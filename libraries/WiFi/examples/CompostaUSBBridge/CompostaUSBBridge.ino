@@ -378,35 +378,55 @@ std::unordered_map<std::string, std::function<chAT::CommandStatus(chAT::Server&,
             if (parser.args.size() <= 0 || parser.args.size() > 5) {
               return chAT::CommandStatus::ERROR;
             }
+            const char * ssid = NULL;
+            const char * passphrase = NULL;
+            int ch  = 1;
+            bool ssid_hidden = false;
+            int max_connection;
+            switch (parser.args.size()) {
+              case 5: {
+                  auto &_max_connection = parser.args[4];
+                  if (_max_connection.empty()) {
+                    return chAT::CommandStatus::ERROR;
+                  }
+                  max_connection = atoi(_max_connection.c_str());
+                }
+              case 4: {
+                  auto &_ssid_hidden = parser.args[3];
+                  if (_ssid_hidden.empty()) {
+                    return chAT::CommandStatus::ERROR;
+                  }
+                  ssid_hidden = atoi(_ssid_hidden.c_str());
+                }
+              case 3: {
+                  auto &_ch = parser.args[2];
+                  if (_ch.empty()) {
+                    return chAT::CommandStatus::ERROR;
+                  }
+                  ch = atoi(_ch.c_str());
+                }
+              case 2: {
+                  auto &_passphrase = parser.args[1];
+                  if (_passphrase.empty()) {
+                    return chAT::CommandStatus::ERROR;
+                  }
+                  passphrase = _passphrase.c_str();
+                }
+              case 1: {
+                  auto &_ssid = parser.args[0];
+                  if (_ssid.empty()) {
+                    return chAT::CommandStatus::ERROR;
+                  }
+                  ssid = _ssid.c_str();
+                  break;
+                }
+              default: {
+                  return chAT::CommandStatus::ERROR;
+                }
+            }
 
-            auto &ssid = parser.args[0];
-            if (ssid.empty()) {
-              return chAT::CommandStatus::OK;
-            }
-            auto &passphrase = parser.args[1];
-            if (passphrase.empty()) {
-              WiFi.softAP(ssid.c_str());
-              return chAT::CommandStatus::OK;
-            }
-            auto &ch = parser.args[2];
-            if (ch.empty()) {
-              WiFi.softAP(ssid.c_str(), passphrase.c_str());
-              return chAT::CommandStatus::OK;
-            }
-
-            auto &ssid_hidden = parser.args[4];
-            if (ssid_hidden.empty()) {
-              WiFi.softAP(ssid.c_str(), passphrase.c_str(), atoi(ch.c_str()));
-              return chAT::CommandStatus::OK;
-            }
-
-            auto &max_connection = parser.args[5];
-            if (max_connection.empty()) {
-              WiFi.softAP(ssid.c_str(), passphrase.c_str(), atoi(ch.c_str()), atoi(ssid_hidden.c_str()));
-              return chAT::CommandStatus::OK;
-            }
-
-            WiFi.softAP(ssid.c_str(), passphrase.c_str(), atoi(ch.c_str()), atoi(ssid_hidden.c_str()), atoi(max_connection.c_str()));
+            WiFi.softAP(ssid, passphrase, ch, ssid_hidden, max_connection);
+            Serial.println("connect");
             return chAT::CommandStatus::OK;
           }
         default:
@@ -574,7 +594,7 @@ std::unordered_map<std::string, std::function<chAT::CommandStatus(chAT::Server&,
             if (parser.args.size() != 2) {
               return chAT::CommandStatus::ERROR;
             }
-            
+
             auto &size_p = parser.args[0];
             if (size_p.empty()) {
               return chAT::CommandStatus::ERROR;
