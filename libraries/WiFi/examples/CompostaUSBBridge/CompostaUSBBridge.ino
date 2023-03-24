@@ -434,12 +434,21 @@ std::unordered_map<std::string, std::function<chAT::CommandStatus(chAT::Server&,
       }
     }
   },
-  { "+WIFICWQIF",  [&](auto & srv, auto & parser) {
       switch (parser.cmd_mode) {
-        case chAT::CommandMode::Read: {
-            srv.write_response_prompt();
-            String ip = WiFi.softAPIP().toString() + "\r\n";
-            srv.write_str((const char *)(ip.c_str()));
+        case chAT::CommandMode::Run: {
+            WiFi.softAPdisconnect();
+            return chAT::CommandStatus::OK;
+          }
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 1) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &wifi_off = parser.args[0];
+            if (wifi_off.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+            WiFi.softAPdisconnect(atoi(wifi_off.c_str()));
             return chAT::CommandStatus::OK;
           }
         default:
