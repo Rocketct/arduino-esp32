@@ -434,6 +434,7 @@ std::unordered_map<std::string, std::function<chAT::CommandStatus(chAT::Server&,
       }
     }
   },
+  { "+WIFICWQIF",  [&](auto & srv, auto & parser) {
       switch (parser.cmd_mode) {
         case chAT::CommandMode::Run: {
             WiFi.softAPdisconnect();
