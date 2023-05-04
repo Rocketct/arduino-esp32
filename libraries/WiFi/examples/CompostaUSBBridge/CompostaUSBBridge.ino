@@ -10,6 +10,10 @@
 
 #include "chAT.hpp"
 #include "WiFi.h"
+#include "Server.h"
+
+#include "WiFiClient.h"
+#include <WiFiClientSecure.h>
 
 #define DEBUG_AT
 
@@ -17,13 +21,19 @@
 #define SERIAL_DEBUG           Serial
 #define SERIAL_USER_INTERNAL   Serial0
 
+#define MAX_CLIENT_AVAILABLE   16
+
 #ifdef DEBUG_AT
 #define SERIAL_AT              Serial
 #else
 #define SERIAL_AT              Serial1
 #endif
 
-WiFiClient client;
+WiFiClient * clients[MAX_CLIENT_AVAILABLE];
+WiFiClientSecure * sslClients[MAX_CLIENT_AVAILABLE];
+
+int clients_num = 0;
+static WiFiServer serverWiFi(80);
 
 void onWiFiEvent(WiFiEvent_t event)
 {
@@ -232,7 +242,6 @@ std::unordered_map<std::string, std::function<chAT::CommandStatus(chAT::Server&,
           }
         case chAT::CommandMode::Read: {
             String mode_read = String(WiFi.getMode()) + "\r\n";
-            Serial.println(mode_read);
             srv.write_response_prompt();
             srv.write_str((const char *)(mode_read.c_str()));
             srv.write_line_end();
@@ -426,7 +435,6 @@ std::unordered_map<std::string, std::function<chAT::CommandStatus(chAT::Server&,
             }
 
             WiFi.softAP(ssid, passphrase, ch, ssid_hidden, max_connection);
-            Serial.println("connect");
             return chAT::CommandStatus::OK;
           }
         default:
@@ -566,31 +574,107 @@ std::unordered_map<std::string, std::function<chAT::CommandStatus(chAT::Server&,
           return chAT::CommandStatus::ERROR;
       }
     }
+  },// new from here
+  { "+WIFICIPV6", [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Read: {
+            String ip_v6 = WiFi.localIPv6().toString() + "\r\n";
+            srv.write_response_prompt();
+            srv.write_str((const char *)(ip_v6.c_str()));
+            return chAT::CommandStatus::OK;
+          }
+        case chAT::CommandMode::Run: {
+            WiFi.enableIpV6();
+            return chAT::CommandStatus::OK;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },  // Object Client
+  { "+WIFICLIENTSTART", [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Run: {
+            if (clients_num < MAX_CLIENT_AVAILABLE) {
+              for (int i = 0; i < MAX_CLIENT_AVAILABLE; i++) {
+                if (clients[i] == nullptr) {
+                  clients[i] = new WiFiClient();
+                  clients_num++;
+                  srv.write_response_prompt();
+                  srv.write_str((const char *) String(i).c_str());
+                  srv.write_line_end();
+                  return chAT::CommandStatus::OK;
+                }
+              }
+
+            }
+            return chAT::CommandStatus::ERROR;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
   },
-  // Object Client
-  { "+WIFISTART",  [&](auto & srv, auto & parser) {
+  { "+WIFICIPSTATE",  [&](auto & srv, auto & parser) {
       switch (parser.cmd_mode) {
         case chAT::CommandMode::Write: {
-            if (parser.args.size() != 2) {
+            if (parser.args.size() != 1) {
               return chAT::CommandStatus::ERROR;
             }
 
-            auto &endpoint_ip = parser.args[0];
+            auto &sock_num = parser.args[0];
+            if (sock_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            int sock = atoi(sock_num.c_str());
+            if (clients[sock] == nullptr) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            if (clients[sock]->connected()) {
+              String client_status = clients[sock]->remoteIP().toString() + "," + String(clients[sock]->remotePort()) + "," + String(clients[sock]->localPort()) + "\r\n";
+              srv.write_response_prompt();
+              srv.write_str((const char *)(client_status.c_str()));
+            }
+            return chAT::CommandStatus::OK;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },
+
+  { "+WIFISTART",  [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 3) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &sock_num = parser.args[0];
+            if (sock_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            int sock = atoi(sock_num.c_str());
+            if (clients[sock] == nullptr) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &endpoint_ip = parser.args[1];
             if (endpoint_ip.empty()) {
               return chAT::CommandStatus::ERROR;
             }
 
-            auto &endpoint_port = parser.args[1];
+            auto &endpoint_port = parser.args[2];
             if (endpoint_port.empty()) {
               return chAT::CommandStatus::ERROR;
             }
 
-            if (!client.connect(endpoint_ip.c_str(), atoi(endpoint_port.c_str()))) {
+            if (!clients[sock]->connect(endpoint_ip.c_str(), atoi(endpoint_port.c_str()))) {
               return chAT::CommandStatus::ERROR;
             }
-            srv.write_response_prompt();
-            srv.write_line_end();
-
             return chAT::CommandStatus::OK;
           }
         default:
@@ -601,25 +685,33 @@ std::unordered_map<std::string, std::function<chAT::CommandStatus(chAT::Server&,
   { "+WIFISEND",  [&](auto & srv, auto & parser) {
       switch (parser.cmd_mode) {
         case chAT::CommandMode::Write: {
-            if (parser.args.size() != 2) {
+            if (parser.args.size() != 3) {
               return chAT::CommandStatus::ERROR;
             }
 
-            auto &size_p = parser.args[0];
+            auto &sock_num = parser.args[0];
+            if (sock_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            int sock = atoi(sock_num.c_str());
+            if (clients[sock] == nullptr) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &size_p = parser.args[1];
             if (size_p.empty()) {
               return chAT::CommandStatus::ERROR;
             }
 
-            auto &data_p = parser.args[1];
+            auto &data_p = parser.args[2];
             if (data_p.empty()) {
               return chAT::CommandStatus::ERROR;
             }
 
-            if (!client.write(data_p.c_str(), atoi(size_p.c_str()))) {
+            if (!(clients[sock]->write(data_p.c_str(), atoi(size_p.c_str())))) {
               return chAT::CommandStatus::ERROR;
             }
-            srv.write_response_prompt();
-            srv.write_line_end();
 
             return chAT::CommandStatus::OK;
           }
@@ -630,8 +722,24 @@ std::unordered_map<std::string, std::function<chAT::CommandStatus(chAT::Server&,
   },
   { "+WIFICLOSE",  [&](auto & srv, auto & parser) {
       switch (parser.cmd_mode) {
-        case chAT::CommandMode::Run: {
-            client.stop();
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 1) {
+              return chAT::CommandStatus::ERROR;
+            }
+            auto &sock_num = parser.args[0];
+            if (sock_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+            int sock = atoi(sock_num.c_str());
+            if (clients[sock] == nullptr) {
+              srv.write_response_prompt();
+              srv.write_str("socket already closed");
+              return chAT::CommandStatus::OK;
+            }
+            clients[sock]->stop();
+            clients_num--;
+
+            free(clients[sock]);// = nullptr;
             return chAT::CommandStatus::OK;
           }
         default:
@@ -639,12 +747,167 @@ std::unordered_map<std::string, std::function<chAT::CommandStatus(chAT::Server&,
       }
     }
   },
+  { "+WIFICIFSR",  [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Read: {
+            for (int i = 0; i < MAX_CLIENT_AVAILABLE; i++) {
+              if (clients[i] != nullptr) {
+                if (clients[i]->connected()) {
+                  String client_status = clients[i]->localIP().toString() + "\r\n";
+                  srv.write_response_prompt();
+                  srv.write_str((const char *)(client_status.c_str()));
+                }
+              }
+            }
+            return chAT::CommandStatus::OK;
+          }
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 1) {
+              return chAT::CommandStatus::ERROR;
+            }
+            auto &sock_num = parser.args[0];
+            if (sock_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+            int sock = atoi(sock_num.c_str());
+
+            if (clients[sock] != nullptr && clients[sock]->connected()) {
+              String client_status = clients[sock]->localIP().toString() + "\r\n";
+              srv.write_response_prompt();
+              srv.write_str((const char *)(client_status.c_str()));
+            }
+            return chAT::CommandStatus::OK;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },
+  // object: Server
+  { "+WIFICIPSERVER",  [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Write: {
+            switch (parser.args.size()) {
+              case 2: {
+                  auto &srv_port = parser.args[0];
+                  if (srv_port.empty()) {
+                    return chAT::CommandStatus::ERROR;
+                  }
+
+                  auto &reuse_enable = parser.args[1];
+                  if (reuse_enable.empty()) {
+                    return chAT::CommandStatus::ERROR;
+                  }
+                  reuse_enable = reuse_enable.c_str();
+                  int port = atoi(srv_port.c_str());
+                  //WiFiServer serverTMP(port);
+
+                  //serverWiFi = &serverTMP;
+                  serverWiFi.begin(port, atoi(reuse_enable.c_str()));
+
+                  return chAT::CommandStatus::OK;
+                }
+              case 1: {
+                  auto &srv_port = parser.args[0];
+                  if (srv_port.empty()) {
+                    return chAT::CommandStatus::ERROR;
+                  }
+                  int port = atoi(srv_port.c_str());
+                  //                  WiFiServer serverTMP(port);
+                  //                  serverWiFi = &serverTMP;
+                  serverWiFi.begin(port);
+                  return chAT::CommandStatus::OK;
+                }
+              default: {
+                  return chAT::CommandStatus::ERROR;
+                }
+            }
+          }
+        case chAT::CommandMode::Run: {
+            //WiFiServer serverTMP(80);
+
+            //serverWiFi = &serverTMP;
+            serverWiFi.begin();
+            return chAT::CommandStatus::OK;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },
+  { "+WIFICWLIF",  [&](auto & srv, auto & parser) { // use this to manage the clients connected to the server
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Write: {// write to do the read of a specific list
+            if (parser.args.size() != 1) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &socket_num = parser.args[0];
+            if (socket_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            int sock = atoi(socket_num.c_str());
+            if (clients[sock] != nullptr)
+            {
+              return chAT::CommandStatus::OK;
+            }
+
+            return chAT::CommandStatus::ERROR;
+          }
+        case chAT::CommandMode::Run: { // run to do the pop of the client list
+            Serial.println(WiFi.localIP());
+            WiFiClient client = serverWiFi.available();
+            if (client && clients_num < MAX_CLIENT_AVAILABLE)
+            {
+              Serial.println("Server?");
+              Serial.println("yes");
+              for (int i = 0; i < MAX_CLIENT_AVAILABLE; i++) {
+                if (clients[i] == nullptr) {
+                  clients[i] = &client;
+                  srv.write_response_prompt();
+                  srv.write_str((const char *) String(i).c_str());
+                  srv.write_line_end();
+                  clients_num++;
+                  return chAT::CommandStatus::OK;
+                }
+              }
+            }
+            Serial.println("no");
+            return chAT::CommandStatus::ERROR;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },
+  // object: client
   { "+WIFIRECV",  [&](auto & srv, auto & parser) {
       switch (parser.cmd_mode) {
         case chAT::CommandMode::Read: {
             String res = "";
-            while (client.available()) {
-              res += client.readStringUntil('\r');
+            while (clients[0]->available()) {
+              res += clients[0]->readStringUntil('\r');
+            }
+            srv.write_response_prompt();
+            srv.write_str((const char *)(res.c_str()));
+            srv.write_line_end();
+
+            return chAT::CommandStatus::OK;
+          }
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 1) {
+              return chAT::CommandStatus::ERROR;
+            }
+            auto &socket_num = parser.args[0];
+            if (socket_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+            int sock = atoi(socket_num.c_str());
+
+            String res = "";
+            while (clients[sock]->available()) {
+              res += clients[sock]->readStringUntil('\r');
             }
             srv.write_response_prompt();
             srv.write_str((const char *)(res.c_str()));
@@ -656,7 +919,268 @@ std::unordered_map<std::string, std::function<chAT::CommandStatus(chAT::Server&,
           return chAT::CommandStatus::ERROR;
       }
     }
-  }
+  },  // Object sslClients
+  { "+WIFISETINSERCURE", [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 1) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &sock_num = parser.args[0];
+            if (sock_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            int sock = atoi(sock_num.c_str());
+            if (sslClients[sock] == nullptr) {
+              return chAT::CommandStatus::ERROR;
+            }
+            sslClients[sock]->setInsecure();
+            return chAT::CommandStatus::OK;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },
+  { "+WIFISSLCLIENTSTART", [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Run: {
+            if (clients_num < MAX_CLIENT_AVAILABLE) {
+              for (int i = 0; i < MAX_CLIENT_AVAILABLE; i++) {
+                if (sslClients[i] == nullptr) {
+                  sslClients[i] = new WiFiClientSecure();
+                  clients_num++;
+                  srv.write_response_prompt();
+                  srv.write_str((const char *) String(i).c_str());
+                  srv.write_line_end();
+                  return chAT::CommandStatus::OK;
+                }
+              }
+
+            }
+            return chAT::CommandStatus::ERROR;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },
+  { "+WIFISSLCIPSTATE",  [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 1) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &sock_num = parser.args[0];
+            if (sock_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            int sock = atoi(sock_num.c_str());
+            if (sslClients[sock] == nullptr) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            if (sslClients[sock]->connected()) {
+              String client_status = sslClients[sock]->remoteIP().toString() + "," + String(sslClients[sock]->remotePort()) + "," + String(sslClients[sock]->localPort()) + "\r\n";
+              srv.write_response_prompt();
+              srv.write_str((const char *)(client_status.c_str()));
+            }
+            return chAT::CommandStatus::OK;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },
+  { "+WIFISSLSTART",  [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 3) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &sock_num = parser.args[0];
+            if (sock_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            int sock = atoi(sock_num.c_str());
+            if (sslClients[sock] == nullptr) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &endpoint_ip = parser.args[1];
+            if (endpoint_ip.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &endpoint_port = parser.args[2];
+            if (endpoint_port.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            if (!sslClients[sock]->connect(endpoint_ip.c_str(), atoi(endpoint_port.c_str()))) {
+              return chAT::CommandStatus::ERROR;
+            }
+            return chAT::CommandStatus::OK;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },
+  { "+WIFISSLSEND",  [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 3) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &sock_num = parser.args[0];
+            if (sock_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            int sock = atoi(sock_num.c_str());
+            if (sslClients[sock] == nullptr) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &size_p = parser.args[1];
+            if (size_p.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            auto &data_p = parser.args[2];
+            if (data_p.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+
+            //            if (!(sslClients[sock]->write(data_p.c_str(), atoi(size_p.c_str())))) {
+            //              return chAT::CommandStatus::ERROR;
+            //            }
+
+            if (!(sslClients[sock]->print(data_p.c_str()))) {
+              return chAT::CommandStatus::ERROR;
+            }
+            /*
+              if (!(sslClients[sock]->println(data_p.c_str()))){//, atoi(size_p.c_str())))) {
+              return chAT::CommandStatus::ERROR;
+              }
+            */
+
+            return chAT::CommandStatus::OK;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },
+  { "+WIFISSLCLOSE",  [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 1) {
+              return chAT::CommandStatus::ERROR;
+            }
+            auto &sock_num = parser.args[0];
+            if (sock_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+            int sock = atoi(sock_num.c_str());
+            if (sslClients[sock] == nullptr) {
+              srv.write_response_prompt();
+              srv.write_str("socket already closed");
+              return chAT::CommandStatus::OK;
+            }
+            sslClients[sock]->stop();
+            clients_num--;
+
+            free(sslClients[sock]);// = nullptr;
+            return chAT::CommandStatus::OK;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },
+  { "+WIFISSLCIFSR",  [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Read: {
+            for (int i = 0; i < MAX_CLIENT_AVAILABLE; i++) {
+              if (sslClients[i] != nullptr) {
+                if (sslClients[i]->connected()) {
+                  String client_status = sslClients[i]->localIP().toString() + "\r\n";
+                  srv.write_response_prompt();
+                  srv.write_str((const char *)(client_status.c_str()));
+                }
+              }
+            }
+            return chAT::CommandStatus::OK;
+          }
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 1) {
+              return chAT::CommandStatus::ERROR;
+            }
+            auto &sock_num = parser.args[0];
+            if (sock_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+            int sock = atoi(sock_num.c_str());
+
+            if (sslClients[sock] != nullptr && sslClients[sock]->connected()) {
+              String client_status = sslClients[sock]->localIP().toString() + "\r\n";
+              srv.write_response_prompt();
+              srv.write_str((const char *)(client_status.c_str()));
+            }
+            return chAT::CommandStatus::OK;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  },
+  { "+WIFISSLRECV",  [&](auto & srv, auto & parser) {
+      switch (parser.cmd_mode) {
+        case chAT::CommandMode::Read: {
+            String res = "";
+            while (sslClients[0]->available()) {
+              res += sslClients[0]->readStringUntil('\r');
+            }
+            srv.write_response_prompt();
+            srv.write_str((const char *)(res.c_str()));
+            srv.write_line_end();
+
+            return chAT::CommandStatus::OK;
+          }
+        case chAT::CommandMode::Write: {
+            if (parser.args.size() != 1) {
+              return chAT::CommandStatus::ERROR;
+            }
+            auto &socket_num = parser.args[0];
+            if (socket_num.empty()) {
+              return chAT::CommandStatus::ERROR;
+            }
+            int sock = atoi(socket_num.c_str());
+
+            String res = "";
+            while (sslClients[sock]->available()) {
+              res += sslClients[sock]->readStringUntil('\r');
+            }
+            srv.write_response_prompt();
+            srv.write_str((const char *)(res.c_str()));
+            srv.write_line_end();
+
+            return chAT::CommandStatus::OK;
+          }
+        default:
+          return chAT::CommandStatus::ERROR;
+      }
+    }
+  }//, add here your new command
 };
 
 bool enableSTA(bool enable);
@@ -706,7 +1230,6 @@ void setup() {
 
 }
 
-int i;
 
 #if !ARDUINO_USB_CDC_ON_BOOT
 #error "Please set USB_CDC_ON_BOOT to make Serial object the USB one"
